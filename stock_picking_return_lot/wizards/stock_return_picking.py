@@ -4,7 +4,7 @@
 
 from collections import defaultdict
 
-from odoo import api, fields, models
+from odoo import Command, api, fields, models
 
 CONTEXT_KEY_FORCE_RECOMPUTE = "stock_picking_return_lot.force_recompute"
 
@@ -35,9 +35,11 @@ class ReturnPicking(models.TransientModel):
         return qties
 
     def _compute_moves_locations(self):
-        # Split up moves by tracked quantities
+        # Split moves per lot, creating new lines safely using Commands (no copy)
         res = super()._compute_moves_locations()
+
         for wizard in self:
+            new_lines_commands = []
             for line in wizard.product_return_moves:
                 qties = self._get_qty_by_lot(line.move_id)
                 first = True
@@ -46,10 +48,21 @@ class ReturnPicking(models.TransientModel):
                         qty = 0
                     if first:
                         line.lot_id = lot
+                        line.quantity = qty
                         first = False
                     elif qty:
-                        line = line.copy({"lot_id": lot.id})
-                    line.quantity = qty
+                        # Use copy_data() + Command.create instead of copy() to avoid
+                        # AttributeError in web UI onchanges:
+                        # copy() creates records with
+                        # int IDs that break Odoo's NewId tracking
+                        # when the wizard form opens
+                        line_vals = line.copy_data()[0]
+                        line_vals["lot_id"] = lot.id
+                        line_vals["quantity"] = qty
+                        new_lines_commands.append(Command.create(line_vals))
+
+            if new_lines_commands:
+                wizard.write({"product_return_moves": new_lines_commands})
 
         return res
 
